@@ -22,7 +22,7 @@ trace _ y = y
 data Rule s r e t a = Rule
   { ruleProd  :: ProdR s r e t a
   , ruleConts :: !(STRef s (STRef s [Cont s r e t a r]))
-  , ruleNulls :: !(Results s a)
+  , ruleNulls :: !(Results s t a)
   }
 
 mkRule :: ProdR s r e t a -> ST s (Rule s r e t a)
@@ -35,7 +35,7 @@ mkRule p = mdo
     return ns
   return $ Rule (removeNulls p) c (Results $ join $ readSTRef computeNullsRef)
 
-prodNulls :: ProdR s r e t a -> Results s a
+prodNulls :: ProdR s r e t a -> Results s t a
 prodNulls prod = case prod of
   Terminal {}     -> empty
   NonTerminal r p -> ruleNulls r <**> prodNulls p
@@ -63,10 +63,10 @@ resetConts r = writeSTRef (ruleConts r) =<< newSTRef mempty
 -------------------------------------------------------------------------------
 -- * Delayed results
 -------------------------------------------------------------------------------
-newtype Results s a = Results { unResults :: ST s [a] }
+newtype Results s t a = Results { unResults :: ST s [(a, [t])] }
   deriving Functor
 
-lazyResults :: ST s [a] -> ST s (Results s a)
+lazyResults :: ST s [(a, [t])] -> ST s (Results s t a)
 lazyResults stas = mdo
   resultsRef <- newSTRef $ do
     as <- stas
@@ -74,21 +74,21 @@ lazyResults stas = mdo
     return as
   return $ Results $ join $ readSTRef resultsRef
 
-instance Applicative (Results s) where
+instance Applicative (Results s t) where
   pure  = return
   (<*>) = ap
 
-instance Alternative (Results s) where
+instance Alternative (Results t s) where
   empty = Results $ pure []
   Results sxs <|> Results sys = Results $ (<|>) <$> sxs <*> sys
 
-instance Monad (Results s) where
-  return = Results . pure . pure
+instance Monad (Results t s) where
+  return x = Results $ pure [(x, mempty)]
   Results stxs >>= f = Results $ do
     xs <- stxs
-    concat <$> mapM (unResults . f) xs
+    concat <$> mapM (\(x, ts) -> fmap (\(y, ts') -> (y, ts' ++ ts)) <$> unResults (f x)) xs
 
-instance Monoid (Results s a) where
+instance Monoid (Results s t a) where
   mempty = empty
   mappend = (<|>)
 
@@ -103,34 +103,34 @@ data BirthPos
 -- | An Earley state with result type @a@.
 data State s r e t a where
   State :: !(ProdR s r e t a)
-        -> !(a -> Results s b)
+        -> !(a -> Results s t b)
         -> !BirthPos
         -> !(Conts s r e t b c)
         -> State s r e t c
-  Final :: !(Results s a) -> State s r e t a
+  Final :: !(Results s t a) -> State s r e t a
 
 -- | A continuation accepting an @a@ and producing a @b@.
 data Cont s r e t a b where
-  Cont      :: !(a -> Results s b)
+  Cont      :: !(a -> Results s t b)
             -> !(ProdR s r e t (b -> c))
-            -> !(c -> Results s d)
+            -> !(c -> Results s t d)
             -> !(Conts s r e t d e')
             -> Cont s r e t a e'
-  FinalCont :: (a -> Results s c) -> Cont s r e t a c
+  FinalCont :: (a -> Results s t c) -> Cont s r e t a c
 
 data Conts s r e t a c = Conts
   { conts     :: !(STRef s [Cont s r e t a c])
-  , contsArgs :: !(STRef s (Maybe (STRef s (Results s a))))
+  , contsArgs :: !(STRef s (Maybe (STRef s (Results s t a))))
   }
 
 newConts :: STRef s [Cont s r e t a c] -> ST s (Conts s r e t a c)
 newConts r = Conts r <$> newSTRef Nothing
 
-contraMapCont :: (b -> Results s a) -> Cont s r e t a c -> Cont s r e t b c
+contraMapCont :: (b -> Results s t a) -> Cont s r e t a c -> Cont s r e t b c
 contraMapCont f (Cont g p args cs) = Cont (f >=> g) p args cs
 contraMapCont f (FinalCont args)   = FinalCont (f >=> args)
 
-contToState :: BirthPos -> Results s a -> Cont s r e t a c -> State s r e t c
+contToState :: BirthPos -> Results s t a -> Cont s r e t a c -> State s r e t c
 contToState pos r (Cont g p args cs) = State p (\f -> fmap f (r >>= g) >>= args) pos cs
 contToState _   r (FinalCont args)   = Final $ r >>= args
 
@@ -158,10 +158,10 @@ initialState p = State p pure Previous <$> (newConts =<< newSTRef [FinalCont pur
 -- * Generation
 -------------------------------------------------------------------------------
 -- | The result of a generator.
-data Result s a
+data Result s t a
   = Ended
     -- ^ The generator ended.
-  | Generated (ST s [a]) Int (ST s (Result s a))
+  | Generated (ST s [(a, [t])]) (ST s (Result s t a))
     -- ^ The generator produced a number of @a@s.  These are given as a
     -- computation, @'ST' s [a]@ that constructs the 'a's when run.  The 'Int' is
     -- the position in the input where these results were obtained, and the last
@@ -175,14 +175,12 @@ safeHead ts
   | otherwise        = Just $ ListLike.head ts
 
 data GenerationEnv s e t a = GenerationEnv
-  { results :: ![ST s [a]]
+  { results :: ![ST s [(a, [t])]]
     -- ^ Results ready to be reported (when this position has been processed)
   , next    :: ![State s a e t a]
     -- ^ States to process at the next position
   , reset   :: !(ST s ())
     -- ^ Computation that resets the continuation refs of productions
-  , curPos  :: !Int
-    -- ^ The current position in the input string
   , tokens  :: ![t]
     -- ^ The possible tokens
   }
@@ -193,30 +191,28 @@ emptyGenerationEnv ts = GenerationEnv
   { results = mempty
   , next    = mempty
   , reset   = return ()
-  , curPos  = 0
   , tokens  = ts
   }
 
 -- | The internal generation routine
 generate :: [State s a e t a] -- ^ States to process at this position
          -> GenerationEnv s e t a
-         -> ST s (Result s a)
+         -> ST s (Result s t a)
 generate [] env@GenerationEnv {results = [], next = []} = trace "p1" $ do
   reset env
   return Ended
 generate [] env@GenerationEnv {results = []} = trace "p2" $ do
   reset env
-  generate (next env)
-        (emptyGenerationEnv $ tokens env) {curPos = curPos env + 1}
+  generate (next env) $ emptyGenerationEnv $ tokens env
 generate [] env = trace "p3" $ do
   reset env
-  return $ Generated (concat <$> sequence (results env)) (curPos env)
+  return $ Generated (concat <$> sequence (results env))
          $ generate [] env {results = [], reset = return ()}
 generate (st:ss) env = trace "p4" $ case st of
   Final res -> trace "final" $ generate ss env {results = unResults res : results env}
   State pr args pos scont -> case pr of
     Terminal f p -> trace "terminal" $ generate ss env
-      { next = [State p (\g -> Results (pure $ map g ts) >>= args) Previous scont | ts <- [filter f $ tokens env], not $ null ts]
+      { next = [State p (\g -> Results (pure $ map (\t -> (g t, [t])) ts) >>= args) Previous scont | ts <- [filter f $ tokens env], not $ null ts]
             ++ next env 
       }
     NonTerminal r p -> trace "nonterminal" $ do
@@ -227,7 +223,7 @@ generate (st:ss) env = trace "p4" $ case st of
       let addNullState
             | null ns = id
             | otherwise = (:)
-                        $ State p (\f -> Results (pure $ map f ns) >>= args) pos scont
+                        $ State p (\f -> f <$> Results (pure ns) >>= args) pos scont
       if null ks then do -- The rule has not been expanded at this position.
         st' <- State (ruleProd r) pure Current <$> newConts rkref
         generate (addNullState $ st' : ss)
@@ -268,20 +264,19 @@ generate (st:ss) env = trace "p4" $ case st of
 
 
 {-# INLINE language #-}
--- | Generate the language for a given grammar.  The 'Int's are the lengths of
--- the strings that produce the elements.
-language :: (forall r. Grammar r (Prod r e t a)) -> [t] -> [(a, Int)]
+-- | Generate the language for a given grammar.
+language :: (forall r. Grammar r (Prod r e t a)) -> [t] -> [(a, [t])]
 language grammar ts = runST $ generator grammar >>= ($ ts) >>= go
   where
-    go :: Result s a -> ST s [(a, Int)]
+    go :: Result s t a -> ST s [(a, [t])]
     go r = case r of
       Ended -> return []
-      Generated mas cpos k -> do
+      Generated mas k -> do
         as <- mas
-        (zip as (repeat cpos) ++) <$> (go =<< k)
+        (as ++) <$> (go =<< k)
 
     generator :: (forall r. Grammar r (Prod r e t a))
-              -> ST s ([t] -> ST s (Result s a))
+              -> ST s ([t] -> ST s (Result s t a))
     generator g = do
       let nt x = NonTerminal x $ pure id
       s <- initialState =<< runGrammar (fmap nt . mkRule) g
