@@ -20,19 +20,19 @@ edit :: Grammar r (Prod r String Text Edit)
 edit = do
 
  action <- rule $ "action"
-   <=> Copy        <$ symbol "copy"
-   <|> Delete      <$ symbol "delete"
-   <|> Cut         <$ symbol "cut"
+   <=> Copy        <$ token "copy"
+   <|> Delete      <$ token "delete"
+   <|> Cut         <$ token "cut"
 
  slice <- rule $ "slice"
-   <=> Whole     <$ symbol "whole"
-   <|> Backwards <$ symbol "backwards"
-   <|> Forwards  <$ symbol "forwards"
+   <=> Whole     <$ token "whole"
+   <|> Backwards <$ token "backwards"
+   <|> Forwards  <$ token "forwards"
 
  region <- rule $ "region"
-   <=> Char <$ symbol "char"
-   <|> Word <$ symbol "word"
-   <|> Line <$ symbol "line"
+   <=> Char <$ token "char"
+   <|> Word <$ token "word"
+   <|> Line <$ token "line"
 
  edit' <- rule $ "edit"
    <=> Edit <$> action            <*> (slice -?- Whole) <*> (region -?- Line)
@@ -112,9 +112,40 @@ Insertion ["whole","line"]
 
 -}
 
-{-
+{- OrderedResults2 outputs:
 
-OrderedResults outputs:
+["line"]
+Insertion ["line"]
+Report {position = 1, expected = [], unconsumed = []}
+
+["copy"]
+Editing (Edit Copy Whole Line)
+Insertion ["copy"]
+Report {position = 1, expected = ["region","slice"], unconsumed = []}
+
+["copy","whole"]
+Editing (Edit Copy Whole Line)
+Insertion ["copy","whole"]
+Report {position = 2, expected = ["region"], unconsumed = []}
+
+["whole","line"]
+Editing (Edit Copy Whole Line)
+Insertion ["whole","line"]
+Report {position = 2, expected = [], unconsumed = []}
+
+["copy","whole","line"]
+Editing (Edit Copy Whole Line)
+Editing (Edit Copy Whole Line)
+Insertion ["copy","whole","line"]
+Report {position = 3, expected = [], unconsumed = []}
+
+["not","an","edit"]
+Insertion ["not","an","edit"]
+Report {position = 3, expected = [], unconsumed = []}
+
+-}
+
+{- OrderedResults outputs:
 
 ["line"]
 Insertion ["line"]
