@@ -1,12 +1,11 @@
 {-# LANGUAGE RecursiveDo #-}
-module Testa where
 import Control.Applicative
 import Text.Earley
 
 grammar :: Grammar r (Prod r () Char [Maybe Char])
 grammar = mdo
   as <- rule $ pure []
-            <|> (:) <$> optional (symbol 'a') <*> as
+            <|> (:) <$> optional (token 'a') <*> as
   return as
 
 -- This grammar has an infinite number of results. We can still recognise the
