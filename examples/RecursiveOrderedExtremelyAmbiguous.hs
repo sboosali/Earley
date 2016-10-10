@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, RecursiveDo, PostfixOperators, TemplateHaskell, LambdaCase, OverloadedStrings, OverloadedLists, NoMonomorphismRestriction #-}
+{-# LANGUAGE ScopedTypeVariables, PostfixOperators, TemplateHaskell, LambdaCase, OverloadedStrings, OverloadedLists, NoMonomorphismRestriction #-}
 
 {-|
 
@@ -9,6 +9,7 @@ stack build :earley-ordered-extremely-ambiguous && stack exec -- earley-ordered-
 import Text.Earley
 import qualified Data.Text as T
 import Data.Text (Text)
+import Control.Monad.Trans.Free (FreeF(..))
 
 import Control.Applicative
 import GHC.Exts (IsString (..),IsList (..))
@@ -165,47 +166,86 @@ parsePhrase :: [Text] -> ([Phrase], Report String [Text])
 parsePhrase s = fullParses (parser phrase) s
 
 phrase :: G r Phrase
-phrase = mdo
+phrase = do
 
-  _phrase :: P r Phrase <- "phrase" <=> Phrase <$>
-   ((\xs x -> xs ++ [x]) <$> ((phraseA <|> phraseB <|> phraseW)-*) <*> (phraseB <|> phraseC <|> phraseD))
+  dictation :: P r Dictation <- "dictation" <=> (Dictation . fmap T.unpack) <$> anyWords
 
-  -- | a sub-phrase where a phrase to the right is certain.
-  phraseA :: P r Phrase_ <- "phraseA" <=> empty
-   <|> pasted
-   <|> Blank_      <$ "blank"
-   -- <|> Spelled_    <$ "spell" # (character-++)
-   -- <|> Spelled_    <$ "lets" # letters -- (letter-++)
-   <|> Bonked_     <$  "smack"   -- (like saying "break" enough times)
-   <|> Separated_  <$> separator
-   <|> Cased_      <$> casing
-   <|> Joined_     <$> joiner
-   <|> Surrounded_ <$> brackets
-   <|> Splitted_   <$> splitter
+  word_ :: P r String <- "word_" <=>
+    (T.unpack) <$> anyWord
 
-  -- | a sub-phrase where a phrase to the right is possible.
-  phraseB :: P r Phrase_ <- "phraseB" <=> empty
-   <|> Escaped_  <$ "litter"            <*> keyword         -- abbreviation for "literally"
-   <|> Quoted_   <$ "quote"             <*> dictation <* "unquote"
+  letters :: P r Letters <- "letters" <=>
+    (Letters . T.unpack) <$> anyLetters
 
-   -- <|> Spelled_  <$ ("let's" <|> "let") <*> (character-++)  -- conflicts with "let" in Haskell
-   <|> Spelled_  <$ "let's" <*> (character-++)  -- abbreviation for "letters"
-   <|> Capped_   <$ "caps"              <*> (character-++)  -- abbreviation for "capital letters"
-   <|> Capped_   <$ "shrimp"            <*> (character-++)  -- abbreviation for "symbol", that's frequent
+  keyword :: P r Keyword <- "keyword" <=>
+    (Keyword . T.unpack) <$> empty
 
-   <|> pasted
-   <|> Blank_     <$ "blank"
+  englishNumeric :: P r Char <- "englishNumeric" <=> vocab
+     [ "zero"-: '0'
+     , "one"-: '1'
+     , "two"-: '2'
+     ]
 
-   <|> Spelled_  <$> (phoneticAlphabet-++)  -- last, since it's unprefixed
+  literalNumeric :: P r Char <- "literalNumeric" <=> vocab
+     [ "0"-: '0'
+     , "1"-: '1'
+     , "2"-: '2'
+     ]
 
-  -- | a sub-phrase where a phrase to the right is impossible.
-  phraseC :: P r Phrase_ <- "phraseC" <=> Dictated_ <$ "say" <*> dictation
+  phoneticAlphabet :: P r Char <- "phoneticAlphabet" <=> vocab
+     [ "alpha"-: 'a'
+     , "bravo"-: 'b'
+     , "charlie"-: 'c'
+     ]
 
-  -- | injects word_ into phrase
-  phraseW :: P r Phrase_ <- "phraseW" <=> word2phrase_ <$> word_
+  literalAlphabet :: P r Char <- "literalAlphabet" <=> vocab
+     [ "a"-: 'a'
+     , "b"-: 'b'
+     , "c"-: 'c'
+     ]
 
-  -- | injects dictation into phrase_
-  phraseD :: P r Phrase_ <- "phraseD" <=> Dictated_ <$> dictation
+  punctuation :: P r Char <- "punctuation" <=> vocab
+     [ "grave"-: '`'
+     , "till"-: '~'
+     , "bang"-: '!'
+     , "axe"-: '@'
+     , "pound"-: '#'
+     , "doll"-: '$'
+     , "purse"-: '%'
+     , "care"-: '^'
+     , "amp"-: '&'
+     , "star"-: '*'
+     , "lore"-: '('
+     , "roar"-: ')'
+     , "hit"-: '-'                  -- during a Phrase,Dragon recognizes "dash" literally as "-"
+     , "score"-: '_'
+     , "equal"-: '='
+     , "plus"-: '+'
+     , "lack"-: '['
+     , "lace"-: '{'
+     , "rack"-: ']'
+     , "race"-: '}'
+     , "stroke"-: '\\'
+     , "pipe"-: '|'
+     , "semi"-: ';'
+     , "coal"-: ':'
+     , "tick"-: '\''
+     , "quote"-: '"'
+     , "com"-: ','
+     , "less"-: '<'
+     , "dot"-: '.'
+     , "great"-: '>'
+     , "slash"-: '/'
+     , "quest"-: '?'
+     , "tab"-: '\t'
+     , "ace"-: ' '
+     , "ret"-: '\n'  -- "line" conflicts with (Line :: Region)
+     ]
+
+  character :: P r Char <- "character" <=> empty
+        <|> punctuation
+        <|> englishNumeric
+        <|> literalNumeric
+        <|> phoneticAlphabet
 
   pasted :: P r Phrase_ <- "pasted" <=> empty
    <|> Pasted_     <$ "pasted"    -- "yank"
@@ -245,81 +285,48 @@ phrase = mdo
   splitter :: P r Splitter <- "splitter" <=> empty
    <|> Splitter <$ "split"
 
-  character :: P r Char <- "character" <=> empty
-   <|> punctuation
-   <|> englishNumeric
-   <|> literalNumeric
-   <|> phoneticAlphabet
+   -- | a sub-phrase where a phrase to the right is certain.
+  phraseA :: P r Phrase_ <- "phraseA" <=> empty
+    <|> pasted
+    <|> Blank_      <$ "blank"
+    -- <|> Spelled_    <$ "spell" # (character-++)
+    -- <|> Spelled_    <$ "lets" # letters -- (letter-++)
+    <|> Bonked_     <$  "smack"   -- (like saying "break" enough times)
+    <|> Separated_  <$> separator
+    <|> Cased_      <$> casing
+    <|> Joined_     <$> joiner
+    <|> Surrounded_ <$> brackets
+    <|> Splitted_   <$> splitter
 
-  englishNumeric :: P r Char <- "englishNumeric" <=> vocab
-   [ "zero"-: '0'
-   , "one"-: '1'
-   , "two"-: '2'
-   ]
+   -- | a sub-phrase where a phrase to the right is possible.
+  phraseB :: P r Phrase_ <- "phraseB" <=> empty
+    <|> Escaped_  <$ "litter"            <*> keyword         -- abbreviation for "literally"
+    <|> Quoted_   <$ "quote"             <*> dictation <* "unquote"
 
-  literalNumeric :: P r Char <- "literalNumeric" <=> vocab
-   [ "0"-: '0'
-   , "1"-: '1'
-   , "2"-: '2'
-   ]
+    -- <|> Spelled_  <$ ("let's" <|> "let") <*> (character-++)  -- conflicts with "let" in Haskell
+    <|> Spelled_  <$ "let's" <*> (character-++)  -- abbreviation for "letters"
+    <|> Capped_   <$ "caps"              <*> (character-++)  -- abbreviation for "capital letters"
+    <|> Capped_   <$ "shrimp"            <*> (character-++)  -- abbreviation for "symbol", that's frequent
 
-  phoneticAlphabet :: P r Char <- "phoneticAlphabet" <=> vocab
-   [ "alpha"-: 'a'
-   , "bravo"-: 'b'
-   , "charlie"-: 'c'
-   ]
+    <|> pasted
+    <|> Blank_     <$ "blank"
 
-  literalAlphabet :: P r Char <- "literalAlphabet" <=> vocab
-   [ "a"-: 'a'
-   , "b"-: 'b'
-   , "c"-: 'c'
-   ]
+    <|> Spelled_  <$> (phoneticAlphabet-++)  -- last, since it's unprefixed
 
-  punctuation :: P r Char <- "punctuation" <=> vocab
-   [ "grave"-: '`'
-   , "till"-: '~'
-   , "bang"-: '!'
-   , "axe"-: '@'
-   , "pound"-: '#'
-   , "doll"-: '$'
-   , "purse"-: '%'
-   , "care"-: '^'
-   , "amp"-: '&'
-   , "star"-: '*'
-   , "lore"-: '('
-   , "roar"-: ')'
-   , "hit"-: '-'                  -- during a Phrase,Dragon recognizes "dash" literally as "-"
-   , "score"-: '_'
-   , "equal"-: '='
-   , "plus"-: '+'
-   , "lack"-: '['
-   , "lace"-: '{'
-   , "rack"-: ']'
-   , "race"-: '}'
-   , "stroke"-: '\\'
-   , "pipe"-: '|'
-   , "semi"-: ';'
-   , "coal"-: ':'
-   , "tick"-: '\''
-   , "quote"-: '"'
-   , "com"-: ','
-   , "less"-: '<'
-   , "dot"-: '.'
-   , "great"-: '>'
-   , "slash"-: '/'
-   , "quest"-: '?'
-   , "tab"-: '\t'
-   , "ace"-: ' '
-   , "ret"-: '\n'  -- "line" conflicts with (Line :: Region)
-   ]
+   -- | a sub-phrase where a phrase to the right is impossible.
+  phraseC :: P r Phrase_ <- "phraseC" <=>
+    Dictated_ <$ "say" <*> dictation
 
-  dictation :: P r Dictation <- "dictation" <=> (Dictation . fmap T.unpack) <$> anyWords
+   -- | injects word_ into phrase
+  phraseW :: P r Phrase_ <- "phraseW" <=>
+    word2phrase_ <$> word_
 
-  word_ :: P r String <- "word_" <=> (T.unpack) <$> anyWord
+   -- | injects dictation into phrase_
+  phraseD :: P r Phrase_ <- "phraseD" <=>
+    Dictated_ <$> dictation
 
-  letters :: P r Letters <- "letters" <=> (Letters . T.unpack) <$> anyLetters
-
-  keyword :: P r Keyword <- "keyword" <=> (Keyword . T.unpack) <$> empty
+  _phrase :: P r Phrase <- "phrase" <=> Phrase <$>
+   ((\xs x -> xs ++ [x]) <$> ((phraseA <|> phraseB <|> phraseW)-*) <*> (phraseB <|> phraseC <|> phraseD))
 
   return _phrase
 
